@@ -6,9 +6,11 @@ node_modules/
 
 # Firebase service account secrets
 *.json
-web-blogs-app-firebase-adminsdk-fbsvc-36cc320e1b.json
+firebase-web-blog.json
 
 # Build outputs
 dist/
 build/
 
+
+.vercel
