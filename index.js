@@ -1,52 +1,50 @@
-// index.js
 import express from "express";
 import dotenv from "dotenv";
 import cors from "cors";
-import { MongoClient, ObjectId } from "mongodb";
+import { MongoClient } from "mongodb";
 import fs from "fs";
 import admin from "firebase-admin";
-import axios from "axios";
-import FormData from "form-data";
 import { fileURLToPath } from "url";
 import path from "path";
 
 dotenv.config();
-
 const app = express();
 
-// Middleware
+// CORS middleware
 app.use(cors({
- origin: 'http://localhost:5173', // আপনার frontend URL
+  origin: [
+    "http://localhost:5173",
+    "https://blog-website-serverside.vercel.app",
+    "https://frolicking-jelly-8e91fc.netlify.app/"
+  ],
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  methods: ['GET','POST','PUT','PATCH','DELETE'],
+  allowedHeaders: ['Content-Type','Authorization']
 }));
 
 app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
 
-// ✅ Debugging middleware - CORS এর পরে
-app.use((req, res, next) => {
-  console.log("====== INCOMING REQUEST ======");
-  console.log("🌐 URL:", req.url);
-  console.log("📝 Method:", req.method);
-  console.log("🔑 Authorization:", req.headers.authorization);
-  console.log("📦 Body:", req.body);
-  console.log("==============================");
+// JSON parse error middleware
+app.use((error, req, res, next) => {
+  if (error instanceof SyntaxError && error.status === 400 && 'body' in error) {
+    console.error('❌ JSON Parsing Error:', error.message);
+    return res.status(400).json({ 
+      success: false, 
+      message: 'Invalid JSON format in request body' 
+    });
+  }
   next();
 });
-
 
 // ES module path fix
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// JSON read
+// Firebase init
 const serviceAccount = JSON.parse(
   fs.readFileSync(path.join(__dirname, "./firebase-web-blog.json"), "utf-8")
 );
 
-// Firebase init
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
   storageBucket: "web-blogs-app.appspot.com"
@@ -54,21 +52,27 @@ admin.initializeApp({
 
 // MongoDB
 let mongoClient;
-let dbInstance; 
+let dbInstance = null;
+
 async function connectDB() {
-  if (!dbInstance) {
+  if (dbInstance) return dbInstance;
+
+  try {
     mongoClient = new MongoClient(
       `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.dvaruep.mongodb.net/?retryWrites=true&w=majority`
     );
     await mongoClient.connect();
-    dbInstance = mongoClient.db(process.env.DB_NAME || "blogWebsite"); // ✅ DB instance set করা
+    dbInstance = mongoClient.db(process.env.DB_NAME || "blogWebsite");
     console.log("✅ MongoDB connected");
+    return dbInstance;
+  } catch (err) {
+    console.error("❌ MongoDB connection failed:", err);
+    process.exit(1);
   }
-  return dbInstance; // ✅ এখন DB instance return করবে
 }
 
 async function getCollections() {
-  const db = await connectDB(); // এখানে DB instance already আছে
+  const db = await connectDB();
   return {
     blogsCollection: db.collection("blogs"),
     usersCollection: db.collection("users"),
@@ -78,6 +82,16 @@ async function getCollections() {
   };
 }
 
+// Start server
+const PORT = process.env.PORT || 5000;
+async function startServer() {
+  await connectDB(); // MongoDB আগে connect হবে
+  app.listen(PORT, () => {
+    console.log(`🚀 Server running on port ${PORT}`);
+  });
+}
+
+startServer();
 
 // Activity Logger
 async function logActivity({ user, type, message, blogId = null }) {
@@ -97,7 +111,7 @@ async function logActivity({ user, type, message, blogId = null }) {
 }
 
 const verifyFirebaseToken = async (req, res, next) => {
-  console.log("🧾 Incoming headers:", req.headers); // check Authorization
+  // console.log("🧾 Incoming headers:", req.headers); // check Authorization
   const authHeader = req.headers.authorization;
 
   try {
@@ -122,8 +136,6 @@ const verifyFirebaseToken = async (req, res, next) => {
   }
 };
 
-
-
 // Example protected route
 app.get("/users", verifyFirebaseToken, async (req, res) => {
   try {
@@ -139,40 +151,23 @@ app.get("/users", verifyFirebaseToken, async (req, res) => {
 app.get("/", (req, res) => res.send("🚀 Blog API running"));
 
 app.post("/users", async (req, res) => {
-  try {
-    const { name, email, photoURL, role } = req.body;
-
-    if (!name || !email) {
-      return res.status(400).json({ message: "Name and email required" });
-    }
-
-    const { usersCollection } = await getCollections();
-    const existingUser = await usersCollection.findOne({ email });
-    if (existingUser) {
-      return res.status(400).json({ message: "User already exists" });
-    }
-
-    const newUser = {
-      uid: null,
-      displayName: name,
-      email,
-      photoURL: photoURL || "https://i.ibb.co/MBtjqXQ/default-avatar.png",
-      role: role || "user",
-      created_at: new Date(),
-      last_log_in: new Date(),
-    };
-
-    await usersCollection.insertOne(newUser);
-    res.status(201).json({ message: "User created", user: newUser });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Server error" });
-  }
+  const user = req.body;
+  const newUser = {
+    name: user.name,
+    email: user.email,
+    role: user.role || "user",
+    photoURL: user.photoURL || "https://i.ibb.co/MBtjqXQ/default-avatar.png", // ✅ default image সহ
+    created_at: new Date(),
+  };
+  const result = await usersCollection.insertOne(newUser);
+  res.json(result);
 });
+
 
 app.get("/users/role", verifyFirebaseToken, async (req, res) => {
   try {
     const email = req.query.email;
+    console.log(email)
     if (!email) return res.status(400).json({ success: false, message: "Email is required" });
 
     const { usersCollection } = await getCollections();
@@ -188,21 +183,149 @@ app.get("/users/role", verifyFirebaseToken, async (req, res) => {
     res.status(500).json({ success: false, message: "Server error" });
   }
 });
-
-app.patch("/users/:id", async (req, res) => {
+// ✅ ADD THIS USER UPDATE ROUTE - app.patch("/users/:id")
+app.patch("/users/:id/role", async (req, res) => {
   try {
     const { id } = req.params;
     const updateData = req.body;
+
+    console.log("🔄 Updating user:", id);
+    console.log("📦 Update data:", updateData);
+
+    // Validate ObjectId
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ 
+        success: false, 
+        message: "Invalid user ID format" 
+      });
+    }
+
+    const { usersCollection } = await getCollections();
+
+    // Check if user exists
+    const existingUser = await usersCollection.findOne({ _id: new ObjectId(id) });
+    if (!existingUser) {
+      return res.status(404).json({ 
+        success: false, 
+        message: "User not found" 
+      });
+    }
+
+    // Prepare update data (remove undefined fields)
+    const cleanUpdateData = {};
+    Object.keys(updateData).forEach(key => {
+      if (updateData[key] !== undefined && updateData[key] !== null) {
+        cleanUpdateData[key] = updateData[key];
+      }
+    });
+
+    // Update user
+    const result = await usersCollection.updateOne(
+      { _id: new ObjectId(id) },
+      { 
+        $set: {
+          ...cleanUpdateData,
+          last_updated: new Date() // Add update timestamp
+        } 
+      }
+    );
+
+    console.log("✅ Update result:", result);
+
+    if (result.modifiedCount === 0) {
+      return res.status(200).json({ 
+        success: true, 
+        message: "No changes made to user data" 
+      });
+    }
+
+    // Get updated user
+    const updatedUser = await usersCollection.findOne({ _id: new ObjectId(id) });
+
+    res.json({ 
+      success: true, 
+      message: "User profile updated successfully", 
+      user: updatedUser 
+    });
+
+  } catch (err) {
+    console.error("❌ Update user error:", err);
+    res.status(500).json({ 
+      success: false, 
+      message: "Server error while updating user",
+      error: err.message 
+    });
+  }
+});
+
+// ✅ ALTERNATIVE: PUT route for user update
+app.put("/users/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const updateData = req.body;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ 
+        success: false, 
+        message: "Invalid user ID" 
+      });
+    }
+
     const { usersCollection } = await getCollections();
 
     const result = await usersCollection.updateOne(
       { _id: new ObjectId(id) },
-      { $set: updateData }
+      { 
+        $set: {
+          ...updateData,
+          last_updated: new Date()
+        } 
+      }
     );
-    res.send(result);
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({ 
+        success: false, 
+        message: "User not found" 
+      });
+    }
+
+    const updatedUser = await usersCollection.findOne({ _id: new ObjectId(id) });
+
+    res.json({ 
+      success: true, 
+      message: "User updated successfully", 
+      user: updatedUser 
+    });
+
+  } catch (err) {
+    console.error("PUT user error:", err);
+    res.status(500).json({ 
+      success: false, 
+      message: "Server error" 
+    });
+  }
+});
+
+// Add these to your backend routes
+
+// Delete user
+app.delete("/admin/users/:id", verifyFirebaseToken, async (req, res) => {
+  try {
+    const { usersCollection } = await getCollections();
+    
+    const result = await usersCollection.deleteOne({ 
+      _id: new ObjectId(req.params.id) 
+    });
+    
+    if (result.deletedCount === 0) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+    
+    res.json({ success: true, message: "User deleted successfully" });
   } catch (err) {
     console.error(err);
-    res.status(500).send({ error: err.message });
+    res.status(500).json({ success: false, message: "Server error" });
   }
 });
 
@@ -218,6 +341,27 @@ app.get("/blogs", async (req, res) => {
   }
 });
 
+app.patch("/blogs/:id", verifyFirebaseToken, async (req, res) => {
+  try {
+    const { blogsCollection } = await getCollections();
+    const { id } = req.params;
+    const updateData = req.body;
+
+    const result = await blogsCollection.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: updateData }
+    );
+
+    if (result.modifiedCount === 0) {
+      return res.status(404).json({ success: false, message: "Blog not found or no changes made" });
+    }
+
+    res.json({ success: true, message: "Blog updated successfully" });
+  } catch (err) {
+    console.error("PATCH /blogs/:id error:", err);
+    res.status(500).json({ success: false, message: "Internal Server Error" });
+  }
+});
 // Add blog
 app.post("/blogs", verifyFirebaseToken, async (req, res) => {
   try {
@@ -282,21 +426,26 @@ app.post("/blogs", async (req, res) => {
   }
 });
 
-app.get("/activities", verifyFirebaseToken, async (req, res) => {
+// Delete blog route
+app.delete("/blogs/:id", verifyFirebaseToken, async (req, res) => {
   try {
-    const uid = req.user.uid; // Firebase token থেকে uid
-    const db = await connectDB();
-    const activitiesCollection = db.collection("activities");
+    const { blogsCollection } = await getCollections();
+    const { id } = req.params;
 
-    const activities = await activitiesCollection
-      .find({ "user.uid": uid }) // শুধু এই user এর activities
-      .sort({ timestamp: -1 })
-      .toArray();
+    // যদি id invalid হয় তাহলে handle করা
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ message: "Invalid blog ID" });
+    }
 
-    res.json(activities);
+    const result = await blogsCollection.deleteOne({ _id: new ObjectId(id) });
+    if (result.deletedCount === 0) {
+      return res.status(404).json({ message: "Blog not found" });
+    }
+
+    res.json({ message: "Blog deleted successfully" });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ message: "Failed to fetch activities" });
+    res.status(500).json({ message: "Server Error", error: err.message });
   }
 });
 app.get("/blogs/:id", async (req, res) => {
@@ -328,29 +477,6 @@ app.put("/blogs/:id", verifyFirebaseToken, async (req, res) => {
 
     await blogsCollection.updateOne({ _id: new ObjectId(id) }, { $set: { ...updateData } });
     res.json({ message: "Blog updated successfully" });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Server Error", error: err.message });
-  }
-});
-
-// Delete blog route
-app.delete("/blogs/:id", verifyFirebaseToken, async (req, res) => {
-  try {
-    const { blogsCollection } = await getCollections();
-    const { id } = req.params;
-
-    // যদি id invalid হয় তাহলে handle করা
-    if (!ObjectId.isValid(id)) {
-      return res.status(400).json({ message: "Invalid blog ID" });
-    }
-
-    const result = await blogsCollection.deleteOne({ _id: new ObjectId(id) });
-    if (result.deletedCount === 0) {
-      return res.status(404).json({ message: "Blog not found" });
-    }
-
-    res.json({ message: "Blog deleted successfully" });
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: "Server Error", error: err.message });
@@ -488,7 +614,23 @@ app.post("/upload-image", async (req, res) => {
     res.status(500).json({ success: false, message: "Upload failed", error: err.message });
   }
 });
+app.get("/activities", verifyFirebaseToken, async (req, res) => {
+  try {
+    const uid = req.user.uid; // Firebase token থেকে uid
+    const db = await connectDB();
+    const activitiesCollection = db.collection("activities");
 
+    const activities = await activitiesCollection
+      .find({ "user.uid": uid }) // শুধু এই user এর activities
+      .sort({ timestamp: -1 })
+      .toArray();
+
+    res.json(activities);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to fetch activities" });
+  }
+});
 // Stats
 app.get("/stats", verifyFirebaseToken, async (req, res) => {
   try {
@@ -573,12 +715,27 @@ app.delete("/contacts/:id", async (req, res) => {
   }
 });
 
+// ✅ SUBSCRIBERS ROUTE FIX - এটা সবচেয়ে সম্ভাব্য problematic route
 app.post("/subscribers", async (req, res) => {
   try {
-    const { email } = req.body;
+    console.log("📥 Subscriber request body:", req.body);
+    
+    // Check if body exists
+    if (!req.body || Object.keys(req.body).length === 0) {
+      return res.status(400).json({ 
+        success: false, 
+        message: "Request body is required" 
+      });
+    }
 
-    if (!email) {
-      return res.status(400).json({ success: false, message: "Email is required" });
+    const { email } = req.body;
+    
+    // Validate email
+    if (!email || email === 'null' || email === 'undefined') {
+      return res.status(400).json({ 
+        success: false, 
+        message: "Valid email address is required" 
+      });
     }
 
     const { subscribersCollection } = await getCollections();
@@ -586,17 +743,29 @@ app.post("/subscribers", async (req, res) => {
     // Check if already subscribed
     const existing = await subscribersCollection.findOne({ email });
     if (existing) {
-      return res.status(400).json({ success: false, message: "Email already subscribed" });
+      return res.status(400).json({ 
+        success: false, 
+        message: "Email already subscribed" 
+      });
     }
 
-    // Insert into DB
-    await subscribersCollection.insertOne({ email, createdAt: new Date() });
-
-    // Success response
-    res.status(201).json({ success: true, message: "Subscribed successfully" });
+    // Insert new subscriber
+    await subscribersCollection.insertOne({ 
+      email, 
+      createdAt: new Date() 
+    });
+    
+    res.status(201).json({ 
+      success: true, 
+      message: "Subscribed successfully" 
+    });
+    
   } catch (err) {
-    console.error("Subscription error:", err);
-    res.status(500).json({ success: false, message: "Subscription failed" });
+    console.error("❌ Subscriber error:", err);
+    res.status(500).json({ 
+      success: false, 
+      message: "Subscription failed" 
+    });
   }
 });
 
@@ -610,7 +779,7 @@ app.get("/subscribers", verifyFirebaseToken, async (req, res) => {
     }
 
     const subscribers = await subscribersCollection.find().toArray();
-    res.json(subscribers);
+    res.json({ success: true, subscribers }); // ✅ important change
   } catch (err) {
     console.error(err);
     res.status(500).json({ success: false, message: "Failed to fetch subscribers" });
@@ -619,36 +788,25 @@ app.get("/subscribers", verifyFirebaseToken, async (req, res) => {
 
 
 // DELETE subscriber
-
-
 app.delete("/subscribers/:id", verifyFirebaseToken, async (req, res) => {
   try {
-    const { id } = req.params;
     const { subscribersCollection, usersCollection } = await getCollections();
-
-    // Admin check
     const user = await usersCollection.findOne({ email: req.user.email });
     if (!user || user.role !== "admin") {
       return res.status(403).json({ success: false, message: "Access denied: Admins only" });
     }
 
-    const result = await subscribersCollection.deleteOne({ _id: new ObjectId(id) });
-    if (result.deletedCount === 0) {
-      return res.status(404).json({ success: false, message: "Subscriber not found" });
+    const result = await subscribersCollection.deleteOne({ _id: new ObjectId(req.params.id) });
+    if (result.deletedCount === 1) {
+      res.json({ success: true, message: "Subscriber deleted successfully" });
+    } else {
+      res.status(404).json({ success: false, message: "Subscriber not found" });
     }
-
-    res.json({ success: true, message: "Subscriber deleted successfully" });
   } catch (err) {
-    console.error("Delete subscriber error:", err);
+    console.error(err);
     res.status(500).json({ success: false, message: "Failed to delete subscriber" });
   }
 });
 
 
 
-
-// Server start
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-});
