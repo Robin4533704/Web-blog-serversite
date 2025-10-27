@@ -1,7 +1,7 @@
 import express from "express";
 import dotenv from "dotenv";
 import cors from "cors";
-import { MongoClient } from "mongodb";
+import { MongoClient, ObjectId } from "mongodb"; // ✅ ObjectId import করো
 import fs from "fs";
 import admin from "firebase-admin";
 import { fileURLToPath } from "url";
@@ -15,7 +15,7 @@ app.use(cors({
   origin: [
     "http://localhost:5173",
     "https://blog-website-serverside.vercel.app",
-    "https://frolicking-jelly-8e91fc.netlify.app/"
+    "https://effortless-vacherin-bc86ae.netlify.app"
   ],
   credentials: true,
   methods: ['GET','POST','PUT','PATCH','DELETE'],
@@ -23,18 +23,6 @@ app.use(cors({
 }));
 
 app.use(express.json());
-
-// JSON parse error middleware
-app.use((error, req, res, next) => {
-  if (error instanceof SyntaxError && error.status === 400 && 'body' in error) {
-    console.error('❌ JSON Parsing Error:', error.message);
-    return res.status(400).json({ 
-      success: false, 
-      message: 'Invalid JSON format in request body' 
-    });
-  }
-  next();
-});
 
 // ES module path fix
 const __filename = fileURLToPath(import.meta.url);
@@ -50,35 +38,49 @@ admin.initializeApp({
   storageBucket: "web-blogs-app.appspot.com"
 });
 
-// MongoDB
-let mongoClient;
-let dbInstance = null;
+// ✅ FIXED MongoDB Connection
+let db;
+let usersCollection;
+let blogsCollection;
+let subscribersCollection;
+let contactsCollection;
+let activitiesCollection;
 
 async function connectDB() {
-  if (dbInstance) return dbInstance;
-
   try {
-    mongoClient = new MongoClient(
+    const mongoClient = new MongoClient(
       `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.dvaruep.mongodb.net/?retryWrites=true&w=majority`
     );
+    
     await mongoClient.connect();
-    dbInstance = mongoClient.db(process.env.DB_NAME || "blogWebsite");
-    console.log("✅ MongoDB connected");
-    return dbInstance;
+    db = mongoClient.db(process.env.DB_NAME || "blogWebsite");
+    
+    // ✅ Initialize collections
+    usersCollection = db.collection("users");
+    blogsCollection = db.collection("blogs");
+    subscribersCollection = db.collection("subscribers");
+    contactsCollection = db.collection("contacts");
+    activitiesCollection = db.collection("activities");
+    
+    console.log("✅ MongoDB connected and collections initialized");
+    return db;
   } catch (err) {
     console.error("❌ MongoDB connection failed:", err);
     process.exit(1);
   }
 }
 
+// ✅ SIMPLIFIED getCollections function
 async function getCollections() {
-  const db = await connectDB();
+  if (!db) {
+    await connectDB();
+  }
   return {
-    blogsCollection: db.collection("blogs"),
-    usersCollection: db.collection("users"),
-    subscribersCollection: db.collection("subscribers"),
-    contactsCollection: db.collection("contacts"),
-    activitiesCollection: db.collection("activities"), 
+    usersCollection,
+    blogsCollection,
+    subscribersCollection,
+    contactsCollection,
+    activitiesCollection
   };
 }
 
@@ -150,29 +152,16 @@ app.get("/users", verifyFirebaseToken, async (req, res) => {
 
 app.get("/", (req, res) => res.send("🚀 Blog API running"));
 
-app.post("/users", async (req, res) => {
-  const user = req.body;
-  const newUser = {
-    name: user.name,
-    email: user.email,
-    role: user.role || "user",
-    photoURL: user.photoURL || "https://i.ibb.co/MBtjqXQ/default-avatar.png", // ✅ default image সহ
-    created_at: new Date(),
-  };
-  const result = await usersCollection.insertOne(newUser);
-  res.json(result);
-});
-
-
+// User role route
 app.get("/users/role", verifyFirebaseToken, async (req, res) => {
   try {
     const email = req.query.email;
-    console.log(email)
+    console.log("🔍 Fetching role for:", email);
+    
     if (!email) return res.status(400).json({ success: false, message: "Email is required" });
 
-    const { usersCollection } = await getCollections();
     const user = await usersCollection.findOne({ email });
-
+    
     if (!user) {
       return res.json({ role: "user" });
     }
@@ -183,6 +172,7 @@ app.get("/users/role", verifyFirebaseToken, async (req, res) => {
     res.status(500).json({ success: false, message: "Server error" });
   }
 });
+
 // ✅ ADD THIS USER UPDATE ROUTE - app.patch("/users/:id")
 app.patch("/users/:id/role", async (req, res) => {
   try {
@@ -258,23 +248,77 @@ app.patch("/users/:id/role", async (req, res) => {
   }
 });
 
-// ✅ ALTERNATIVE: PUT route for user update
-app.put("/users/:id", async (req, res) => {
+// ✅ FIXED Users Route - Simple and working
+app.post("/users", async (req, res) => {
   try {
-    const { id } = req.params;
-    const updateData = req.body;
+    const user = req.body;
+    console.log("📥 Creating user:", user);
 
-    if (!ObjectId.isValid(id)) {
-      return res.status(400).json({ 
-        success: false, 
-        message: "Invalid user ID" 
+    if (!user.email) {
+      return res.status(400).json({ message: "Email is required" });
+    }
+
+    // ✅ Use the directly initialized collection
+    const existingUser = await usersCollection.findOne({ 
+      $or: [
+        { email: user.email },
+        { _id: user._id || user.uid }
+      ] 
+    });
+
+    if (existingUser) {
+      console.log("ℹ️ User already exists:", user.email);
+      return res.status(200).json({ 
+        success: true, 
+        message: "User already exists",
+        user: existingUser 
       });
     }
 
-    const { usersCollection } = await getCollections();
+    // Prepare user data
+    const userData = {
+      _id: user._id || user.uid,
+      uid: user.uid,
+      email: user.email,
+      name: user.name || user.displayName || "",
+      displayName: user.displayName || user.name || "",
+      photoURL: user.photoURL || "",
+      role: user.role || "user",
+      emailVerified: user.emailVerified || false,
+      created_at: new Date(),
+      last_login: new Date()
+    };
 
+    const result = await usersCollection.insertOne(userData);
+    console.log("✅ User created successfully:", user.email);
+    
+    res.status(201).json({ 
+      success: true, 
+      message: "User created successfully",
+      user: userData 
+    });
+  } catch (error) {
+    console.error("❌ /users POST error:", error);
+    res.status(500).json({ 
+      success: false, 
+      message: "Server error", 
+      error: error.message 
+    });
+  }
+});
+
+// ✅ FIXED User Update Route
+app.patch("/users/:uid", async (req, res) => {
+  try {
+    const { uid } = req.params;
+    const updateData = req.body;
+    
+    console.log("🔄 Updating user:", uid);
+    console.log("📦 Update data:", updateData);
+
+    // ✅ Use the directly initialized collection
     const result = await usersCollection.updateOne(
-      { _id: new ObjectId(id) },
+      { uid: uid }, 
       { 
         $set: {
           ...updateData,
@@ -290,22 +334,24 @@ app.put("/users/:id", async (req, res) => {
       });
     }
 
-    const updatedUser = await usersCollection.findOne({ _id: new ObjectId(id) });
-
-    res.json({ 
+    const updatedUser = await usersCollection.findOne({ uid: uid });
+    res.status(200).json({ 
       success: true, 
       message: "User updated successfully", 
       user: updatedUser 
     });
-
-  } catch (err) {
-    console.error("PUT user error:", err);
+  } catch (error) {
+    console.error("❌ /users/:uid PATCH error:", error);
     res.status(500).json({ 
       success: false, 
-      message: "Server error" 
+      message: "Server error", 
+      error: error.message 
     });
   }
 });
+
+
+
 
 // Add these to your backend routes
 
@@ -785,8 +831,6 @@ app.get("/subscribers", verifyFirebaseToken, async (req, res) => {
     res.status(500).json({ success: false, message: "Failed to fetch subscribers" });
   }
 });
-
-
 // DELETE subscriber
 app.delete("/subscribers/:id", verifyFirebaseToken, async (req, res) => {
   try {
@@ -808,5 +852,167 @@ app.delete("/subscribers/:id", verifyFirebaseToken, async (req, res) => {
   }
 });
 
+
+// ✅ GET Support Tickets
+app.get('/support/tickets', async (req, res) => {
+  try {
+    const { email } = req.query;
+    console.log("📧 Fetching tickets for email:", email);
+    
+    let query = {};
+    if (email && email !== 'undefined' && email !== 'null') {
+      query.email = email;
+    }
+
+    const { contactsCollection } = await getCollections();
+    const tickets = await contactsCollection.find(query).sort({ createdAt: -1 }).toArray();
+    
+    console.log(`✅ Found ${tickets.length} tickets for ${email}`);
+    
+    res.json({ 
+      success: true, 
+      tickets: tickets.map(ticket => ({
+        _id: ticket._id,
+        name: ticket.name,
+        email: ticket.email,
+        subject: ticket.subject,
+        category: ticket.category || 'general',
+        priority: ticket.priority || 'medium',
+        message: ticket.message,
+        status: ticket.status || 'open',
+        ticketNumber: ticket.ticketNumber || `TKT-${ticket._id}`,
+        createdAt: ticket.createdAt,
+        updatedAt: ticket.updatedAt
+      }))
+    });
+  } catch (error) {
+    console.error('❌ GET /api/support/tickets error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Server error while fetching tickets',
+      error: error.message 
+    });
+  }
+});
+// ✅ POST Support Ticket
+app.post('/support/tickets', async (req, res) => {
+  try {
+    const { name, email, subject, category, priority, message } = req.body;
+    
+    console.log("📥 New support ticket:", { name, email, subject, category, priority, message });
+
+    // Validation
+    if (!name || !email || !subject || !message) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'All required fields must be filled' 
+      });
+    }
+
+    const { contactsCollection } = await getCollections();
+
+    // Create ticket data
+    const ticketData = {
+      name,
+      email,
+      subject,
+      category: category || 'general',
+      priority: priority || 'medium',
+      message,
+      status: 'open',
+      ticketNumber: `TKT-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
+
+    // Insert into contacts collection (jeta tumi already use koro)
+    const result = await contactsCollection.insertOne(ticketData);
+    
+    console.log("✅ Support ticket created:", ticketData.ticketNumber);
+
+    res.status(201).json({
+      success: true,
+      message: 'Support ticket created successfully',
+      ticket: {
+        _id: result.insertedId,
+        ...ticketData
+      }
+    });
+  } catch (error) {
+    console.error('❌ POST /api/support/tickets error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Server error while creating ticket',
+      error: error.message 
+    });
+  }
+});
+// ✅ PUT Update Ticket Status
+app.put('/support/tickets/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+
+    const { contactsCollection } = await getCollections();
+
+    const result = await contactsCollection.updateOne(
+      { _id: new ObjectId(id) },
+      { 
+        $set: { 
+          status,
+          updatedAt: new Date()
+        } 
+      }
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Ticket not found' 
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Ticket status updated successfully'
+    });
+  } catch (error) {
+    console.error('❌ PUT /api/support/tickets/:id error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Server error while updating ticket',
+      error: error.message 
+    });
+  }
+});
+// ✅ DELETE Support Ticket
+app.delete('/support/tickets/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const { contactsCollection } = await getCollections();
+
+    const result = await contactsCollection.deleteOne({ _id: new ObjectId(id) });
+
+    if (result.deletedCount === 0) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Ticket not found' 
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Ticket deleted successfully'
+    });
+  } catch (error) {
+    console.error('❌ DELETE /api/support/tickets/:id error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Server error while deleting ticket',
+      error: error.message 
+    });
+  }
+});
 
 
